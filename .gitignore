@@ -15,3 +15,7 @@ uv.lock
 **/src/TileDL_002.ipynb
 **/templates/styles.css
 **/templates/index_copy.html
+
+# Cache
+downloads/
+tile-cache

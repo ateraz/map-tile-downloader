@@ -4,3 +4,5 @@ requests
 mercantile
 shapely
 pillow
+rasterio
+numpy

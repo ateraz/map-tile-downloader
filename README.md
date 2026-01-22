@@ -52,6 +52,14 @@ Adding a New Map Source: Simply add a new key-value pair to the JSON file with t
 
 
 ## Usage
+### CLI
+
+```
+python src/download_geotiff.py --lat -32.6017 --lon 116.2756 --width 86000 --height 32000 --zoom 17
+```
+
+### Web UI
+
 1.	Navigate to the application directory and Run the Application:
 
 		python src/TileDL.py

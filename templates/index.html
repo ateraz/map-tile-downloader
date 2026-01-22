@@ -54,10 +54,11 @@
                 <input type="checkbox" id="use_cache" name="use_cache"> Use cached tiles<br>
                 <input type="checkbox" id="convert_to_8bit" checked> Convert to 8 bit for Meshtastic UI Maps<br>
                 <input type="checkbox" id="view_cached_tiles"> View cached tiles<br>
-                <button type="button" id="downloadBtn">Download Tiles</button>
+                <button type="button" id="downloadBtn">Download as GeoTIFF</button>
                 <button type="button" id="downloadWorldBtn">Download World Basemap</button>
                 <button type="button" id="cancelBtn" disabled>Cancel Download</button>
                 <button type="button" id="deleteCacheBtn">Delete Cache</button>
+                <button type="button" id="exportZipBtn">Export Tiles as ZIP</button>
             </form>
         </div>
         <div id="progress">Ready</div>
@@ -199,6 +200,37 @@
             socket.emit('start_world_download', {map_style: mapStyleUrl, convert_to_8bit: convertTo8bit});
         });
 
+        // Handle export tiles as ZIP
+        document.getElementById('exportZipBtn').addEventListener('click', function() {
+            var mapStyleSelect = document.getElementById('map_style');
+            var styleName = sanitizeStyleName(mapStyleSelect.options[mapStyleSelect.selectedIndex].text);
+            var mapStyleUrl = mapStyleSelect.value;
+
+            // Use the existing cached tiles to create a ZIP
+            fetch(`/export_zip/${styleName}`)
+                .then(response => {
+                    if (response.ok) {
+                        return response.blob();
+                    } else {
+                        throw new Error('No cached tiles found for this style');
+                    }
+                })
+                .then(blob => {
+                    // Create download link
+                    var url = window.URL.createObjectURL(blob);
+                    var a = document.createElement('a');
+                    a.href = url;
+                    a.download = `${styleName}.zip`;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                })
+                .catch(error => {
+                    alert(error.message);
+                });
+        });
+
         // Handle cache deletion
         document.getElementById('deleteCacheBtn').addEventListener('click', function() {
             if (confirm('Are you sure you want to delete the cached tiles for this style?')) {
@@ -286,7 +318,11 @@
         });
 
         socket.on('tiles_downloaded', function() {
-            document.getElementById('progress').innerHTML += '<br>Tiles downloaded, preparing zip...';
+            document.getElementById('progress').innerHTML += '<br>Tiles downloaded, creating GeoTIFF...';
+        });
+
+        socket.on('geotiff_created', function(data) {
+            document.getElementById('progress').innerHTML += '<br>GeoTIFF created successfully!';
         });
 
         socket.on('zipping_started', function() {
@@ -297,7 +333,12 @@
             document.getElementById('cancelBtn').disabled = true;
             downloadProgressLayer.clearLayers();
             document.getElementById('progress').innerHTML = 'Ready';
-            window.location.href = data.zip_url;
+            // Check if it's a GeoTIFF or ZIP download
+            if (data.geotiff_url) {
+                window.location.href = data.geotiff_url;
+            } else if (data.zip_url) {
+                window.location.href = data.zip_url;
+            }
         });
 
         socket.on('download_cancelled', function() {

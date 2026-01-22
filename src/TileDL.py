@@ -18,6 +18,10 @@ from shapely.ops import unary_union
 import threading
 from PIL import Image
 from pathlib import Path
+import rasterio
+from rasterio.transform import from_bounds
+from rasterio.warp import calculate_default_transform, reproject, Resampling
+import numpy as np
 
 # Base directory for caching tiles, absolute path relative to script location
 BASE_DIR = Path(__file__).parent.parent  # Root of map-tile-downloader
@@ -170,6 +174,91 @@ def download_tiles_with_retries(tiles, map_style, style_cache_dir, convert_to_8b
     if download_event.is_set():
         socketio.emit('tiles_downloaded')
 
+def create_geotiff(tiles, style_cache_dir, style_name):
+    """Create a GeoTIFF from downloaded tiles by stitching them together."""
+    if not tiles:
+        return None
+
+    # Group tiles by zoom level
+    tiles_by_zoom = {}
+    for tile in tiles:
+        if tile.z not in tiles_by_zoom:
+            tiles_by_zoom[tile.z] = []
+        tiles_by_zoom[tile.z].append(tile)
+
+    # Use the highest zoom level for the output
+    max_zoom = max(tiles_by_zoom.keys())
+    tiles_at_max_zoom = tiles_by_zoom[max_zoom]
+
+    # Calculate the bounding box and dimensions
+    min_x = min(tile.x for tile in tiles_at_max_zoom)
+    max_x = max(tile.x for tile in tiles_at_max_zoom)
+    min_y = min(tile.y for tile in tiles_at_max_zoom)
+    max_y = max(tile.y for tile in tiles_at_max_zoom)
+
+    # Get the geographic bounds
+    nw_tile = mercantile.Tile(min_x, min_y, max_zoom)
+    se_tile = mercantile.Tile(max_x, max_y, max_zoom)
+    nw_bounds = mercantile.bounds(nw_tile)
+    se_bounds = mercantile.bounds(se_tile)
+
+    west = nw_bounds.west
+    north = nw_bounds.north
+    east = se_bounds.east
+    south = se_bounds.south
+
+    # Calculate dimensions (each tile is 256x256 pixels)
+    tile_size = 256
+    width = (max_x - min_x + 1) * tile_size
+    height = (max_y - min_y + 1) * tile_size
+
+    # Create the output array
+    output_array = np.zeros((height, width, 3), dtype=np.uint8)
+
+    # Stitch tiles together
+    for tile in tiles_at_max_zoom:
+        tile_path = style_cache_dir / str(tile.z) / str(tile.x) / f"{tile.y}.png"
+        if tile_path.exists():
+            with Image.open(tile_path) as img:
+                # Convert to RGB if needed
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+
+                # Calculate position in output array
+                x_offset = (tile.x - min_x) * tile_size
+                y_offset = (tile.y - min_y) * tile_size
+
+                # Place tile in output array
+                img_array = np.array(img)
+                output_array[y_offset:y_offset + tile_size, x_offset:x_offset + tile_size] = img_array
+
+    # Create the GeoTIFF
+    sanitized_name = sanitize_style_name(style_name)
+    geotiff_path = DOWNLOADS_DIR / f'{sanitized_name}_z{max_zoom}.tif'
+
+    # Create transform for Web Mercator (EPSG:3857)
+    transform = from_bounds(west, south, east, north, width, height)
+
+    # Write the GeoTIFF
+    with rasterio.open(
+        geotiff_path,
+        'w',
+        driver='GTiff',
+        height=height,
+        width=width,
+        count=3,  # RGB
+        dtype=rasterio.uint8,
+        crs='EPSG:4326',  # WGS84
+        transform=transform,
+        compress='lzw'
+    ) as dst:
+        # Write each band
+        for band in range(3):
+            dst.write(output_array[:, :, band], band + 1)
+
+    socketio.emit('geotiff_created', {'path': str(geotiff_path)})
+    return str(geotiff_path)
+
 def create_zip(style_cache_dir, style_name):
     """Create a zip file from the style-specific cache directory in the downloads folder."""
     sanitized_name = sanitize_style_name(style_name)
@@ -213,8 +302,11 @@ def handle_start_download(data):
         download_event.set()
         download_tiles_with_retries(tiles, map_style_url, style_cache_dir, convert_to_8bit)
         if download_event.is_set():
-            zip_path = create_zip(style_cache_dir, style_name)
-            emit('download_complete', {'zip_url': f'/download_zip?path={zip_path}'})
+            geotiff_path = create_geotiff(tiles, style_cache_dir, style_name)
+            if geotiff_path:
+                emit('download_complete', {'geotiff_url': f'/download_geotiff?path={geotiff_path}'})
+            else:
+                emit('error', {'message': 'Failed to create GeoTIFF'})
     except Exception as e:
         print(f"Error processing download: {e}")
         emit('error', {'message': 'An error occurred while processing your request'})
@@ -231,8 +323,11 @@ def handle_start_world_download(data):
         download_event.set()
         download_tiles_with_retries(tiles, map_style_url, style_cache_dir, convert_to_8bit)
         if download_event.is_set():
-            zip_path = create_zip(style_cache_dir, style_name)
-            emit('download_complete', {'zip_url': f'/download_zip?path={zip_path}'})
+            geotiff_path = create_geotiff(tiles, style_cache_dir, style_name)
+            if geotiff_path:
+                emit('download_complete', {'geotiff_url': f'/download_geotiff?path={geotiff_path}'})
+            else:
+                emit('error', {'message': 'Failed to create GeoTIFF'})
     except Exception as e:
         print(f"Error processing world download: {e}")
         emit('error', {'message': 'An error occurred while processing your request'})
@@ -243,12 +338,30 @@ def handle_cancel_download():
     download_event.clear()
     emit('download_cancelled')
 
+@app.route('/download_geotiff')
+def download_geotiff():
+    """Send the GeoTIFF file to the user."""
+    geotiff_path = request.args.get('path')
+    while not Path(geotiff_path).exists():  # Wait until the file is created
+        time.sleep(0.5)
+    return send_file(geotiff_path, as_attachment=True, download_name=Path(geotiff_path).name)
+
 @app.route('/download_zip')
 def download_zip():
     """Send the zip file to the user."""
     zip_path = request.args.get('path')
     while not Path(zip_path).exists():  # Wait until the file is created
         time.sleep(0.5)
+    return send_file(zip_path, as_attachment=True, download_name=Path(zip_path).name)
+
+@app.route('/export_zip/<style_name>')
+def export_zip(style_name):
+    """Export cached tiles as a ZIP file."""
+    style_cache_dir = get_style_cache_dir(style_name)
+    if not style_cache_dir.exists() or not any(style_cache_dir.iterdir()):
+        return 'No cached tiles found for this style', 404
+
+    zip_path = create_zip(style_cache_dir, style_name)
     return send_file(zip_path, as_attachment=True, download_name=Path(zip_path).name)
 
 @app.route('/tiles/<style_name>/<int:z>/<int:x>/<int:y>.png')

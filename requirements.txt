@@ -6,3 +6,6 @@ shapely
 pillow
 rasterio
 numpy
+pyproj
+bmi_topography
+pyyaml
